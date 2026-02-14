@@ -98,6 +98,17 @@ def find_case_channel(case_number):
     return None, None
 
 
+def join_channel(channel_id):
+    """Auto-join a channel so the bot can post in it."""
+    try:
+        app.client.conversations_join(channel=channel_id)
+        print(f"  Joined channel {channel_id}")
+    except Exception as e:
+        # Already in channel or other non-fatal error
+        if "already_in_channel" not in str(e):
+            print(f"  Warning joining channel {channel_id}: {e}")
+
+
 def get_tagged_users_from_topic(channel_id):
     """Read the channel topic and extract user mentions."""
     try:
@@ -164,6 +175,9 @@ def handle_message(event, say):
             continue
 
         print(f"  Found channel: #{case_channel_name}")
+
+        # Auto-join the channel so the bot can read topic and post
+        join_channel(case_channel_id)
 
         # Get tagged users from the channel topic
         tagged_users = get_tagged_users_from_topic(case_channel_id)
