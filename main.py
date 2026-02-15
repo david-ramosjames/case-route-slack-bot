@@ -147,8 +147,9 @@ def handle_message(event, say):
     if event.get("channel") != source_channel_id:
         return
 
-    # Ignore bot messages, edits, etc.
-    if event.get("subtype"):
+    # Ignore edits, deletions, etc. but allow bot messages (from Quo)
+    subtype = event.get("subtype")
+    if subtype and subtype != "bot_message":
         return
 
     text = event.get("text", "")
