@@ -112,27 +112,28 @@ def get_message_text(message):
 
 def parse_quo_message(text):
     """
-    Parse a Quo message to extract contact name, case numbers, and message body.
+    Parse a Quo message to extract contact name, case numbers, phone number, and message body.
 
     Format: "Name CaseNum(s) (phone) → RJL line (phone) MessageText"
 
-    Returns: (contact_name, [case_numbers], message_body) or (None, [], None) if no contact
+    Returns: (contact_name, [case_numbers], phone_number, message_body) or (None, [], None, None) if no contact
     """
     # Check if message starts with a phone number (no saved contact) — skip
     if re.match(r"^\(\d{3}\)", text.strip()):
-        return None, [], None
+        return None, [], None, None
 
     # Extract everything before the first phone number as the contact + case info
-    contact_match = re.match(r"^(.+?)\s*\(\d{3}\)\s*\d{3}-\d{4}", text)
+    contact_match = re.match(r"^(.+?)\s*(\(\d{3}\)\s*\d{3}-\d{4})", text)
     if not contact_match:
-        return None, [], None
+        return None, [], None, None
 
     contact_part = contact_match.group(1).strip()
+    phone_number = contact_match.group(2).strip()
 
     # Extract case numbers (3-5 digit numbers, possibly joined by "&")
     case_numbers = re.findall(r"\b(\d{3,5})\b", contact_part)
     if not case_numbers:
-        return None, [], None
+        return None, [], None, None
 
     # Extract the contact name (everything before the first number)
     name_match = re.match(r"^([A-Za-z\s]+)", contact_part)
@@ -140,12 +141,13 @@ def parse_quo_message(text):
 
     # Extract the message body
     # Quo uses \n to separate the header line from the message body
-    body_match = re.search(r"→\s*RJL[^)]+\)\n\s*(.*)", text, re.DOTALL)
+    # The header ends after the second phone number: → RJL ... (xxx) xxx-xxxx
+    body_match = re.search(r"→\s*RJL.*?\(\d{3}\)\s*\d{3}-\d{4}\n\s*(.*)", text, re.DOTALL)
     if not body_match:
-        body_match = re.search(r"→\s*RJL[^)]+\)\s*(.*)", text, re.DOTALL)
+        body_match = re.search(r"→\s*RJL.*?\(\d{3}\)\s*\d{3}-\d{4}\s*(.*)", text, re.DOTALL)
     message_body = body_match.group(1).strip() if body_match else text
 
-    return contact_name, case_numbers, message_body
+    return contact_name, case_numbers, phone_number, message_body
 
 
 def find_case_channel(case_number):
@@ -237,13 +239,14 @@ def process_message(message):
     print(f"  Text: {text[:120]}")
 
     # Parse the Quo message
-    contact_name, case_numbers, message_body = parse_quo_message(text)
+    contact_name, case_numbers, phone_number, message_body = parse_quo_message(text)
 
     if not contact_name:
         print(f"  Skipped — no saved contact or case number")
         return
 
     print(f"  Contact: {contact_name}")
+    print(f"  Phone: {phone_number}")
     print(f"  Case numbers: {case_numbers}")
     print(f"  Message: {message_body[:80]}")
 
@@ -265,7 +268,7 @@ def process_message(message):
         mentions = " ".join([f"<@{uid}>" for uid in tagged_users])
 
         # Build the message
-        forwarded_message = f"📱 *{contact_name}* (Case {case_number}):\n\n{message_body}"
+        forwarded_message = f"📱 *{contact_name}* {phone_number} (Case {case_number}):\n\n{message_body}"
         if mentions:
             forwarded_message += f"\n\n{mentions}"
 
