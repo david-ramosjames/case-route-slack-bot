@@ -200,12 +200,16 @@ def get_new_messages():
 
 def process_message(message):
     """Process a single message from the source channel."""
+    # DEBUG: Log the raw message so we can see exactly what Quo sends
+    print(f"\n{'='*60}")
+    print(f"RAW MESSAGE: {message}")
+
     # Extract text from the message
     text = get_message_text(message)
     if not text:
+        print(f"  Could not extract text")
         return
 
-    print(f"\n{'='*60}")
     print(f"New message:")
     print(f"  From: {message.get('username', message.get('user', message.get('bot_id', 'unknown')))}")
     print(f"  Text: {text[:120]}")
