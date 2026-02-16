@@ -56,37 +56,60 @@ def get_source_channel_id():
 def get_message_text(message):
     """
     Extract the text from a message.
-    Handles regular text, attachments, and blocks.
+    Handles regular text, attachments with blocks (Quo's format), and top-level blocks.
     """
     # Try the normal text field first
     text = message.get("text", "")
     if text:
-        return text
+        return clean_mrkdwn(text)
 
-    # Some bots put content in attachments
+    # Quo puts content inside attachments → blocks → section
     attachments = message.get("attachments", [])
     for att in attachments:
-        if att.get("text"):
-            return att["text"]
-        if att.get("fallback"):
-            return att["fallback"]
-        if att.get("pretext"):
-            return att["pretext"]
+        # Check blocks inside attachments (this is Quo's format)
+        att_blocks = att.get("blocks", [])
+        for block in att_blocks:
+            if block.get("type") == "section":
+                block_text = block.get("text", {})
+                if block_text.get("text"):
+                    return clean_mrkdwn(block_text["text"])
 
-    # Some bots use blocks
+        # Fallback to attachment-level text fields
+        if att.get("text"):
+            return clean_mrkdwn(att["text"])
+        if att.get("pretext"):
+            return clean_mrkdwn(att["pretext"])
+
+    # Top-level blocks
     blocks = message.get("blocks", [])
     for block in blocks:
         if block.get("type") == "rich_text":
             for element in block.get("elements", []):
                 for sub in element.get("elements", []):
                     if sub.get("type") == "text":
-                        return sub.get("text", "")
+                        return clean_mrkdwn(sub.get("text", ""))
         if block.get("type") == "section":
             block_text = block.get("text", {})
             if block_text.get("text"):
-                return block_text["text"]
+                return clean_mrkdwn(block_text["text"])
 
     return ""
+
+
+def clean_mrkdwn(text):
+    """
+    Clean Slack mrkdwn formatting to get plain text.
+    - Converts <url|label> links to just the label
+    - Converts <tel:number|label> to just the label
+    - Removes bold markers *text* → text
+    """
+    # Convert <url|label> and <tel:number|label> to just the label
+    text = re.sub(r"<[^|>]+\|([^>]+)>", r"\1", text)
+    # Remove any remaining <url> links without labels
+    text = re.sub(r"<([^>]+)>", r"\1", text)
+    # Remove bold markers
+    text = text.replace("*", "")
+    return text.strip()
 
 
 def parse_quo_message(text):
@@ -122,8 +145,12 @@ def parse_quo_message(text):
     name_match = re.match(r"^([A-Za-z\s]+)", contact_part)
     contact_name = name_match.group(1).strip() if name_match else "Unknown"
 
-    # Extract the message body (everything after the → RJL... (phone) pattern)
-    body_match = re.search(r"→\s*RJL[^)]+\)\s*(.*)", text, re.DOTALL)
+    # Extract the message body
+    # Quo uses \n to separate the header line from the message body
+    # Also handle the old format where it's all on one line after → RJL... (phone)
+    body_match = re.search(r"→\s*RJL[^)]+\)\n\s*(.*)", text, re.DOTALL)
+    if not body_match:
+        body_match = re.search(r"→\s*RJL[^)]+\)\s*(.*)", text, re.DOTALL)
     message_body = body_match.group(1).strip() if body_match else text
 
     return contact_name, case_numbers, message_body
