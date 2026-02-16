@@ -110,6 +110,20 @@ def get_message_text(message):
     return ""
 
 
+def get_image_urls(message):
+    """Extract image URLs from a Quo message."""
+    image_urls = []
+    attachments = message.get("attachments", [])
+    for att in attachments:
+        att_blocks = att.get("blocks", [])
+        for block in att_blocks:
+            if block.get("type") == "image":
+                url = block.get("image_url")
+                if url:
+                    image_urls.append(url)
+    return image_urls
+
+
 def parse_quo_message(text):
     """
     Parse a Quo message to extract contact name, case numbers, phone number, and message body.
@@ -238,6 +252,11 @@ def process_message(message):
     print(f"  From: {message.get('username', message.get('user', message.get('bot_id', 'unknown')))}")
     print(f"  Text: {text[:120]}")
 
+    # Get any image URLs from the message
+    image_urls = get_image_urls(message)
+    if image_urls:
+        print(f"  Images: {len(image_urls)} found")
+
     # Parse the Quo message
     contact_name, case_numbers, phone_number, message_body = parse_quo_message(text)
 
@@ -272,13 +291,31 @@ def process_message(message):
         if mentions:
             forwarded_message += f"\n\n{mentions}"
 
+        # Build blocks with images if present
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": forwarded_message
+                }
+            }
+        ]
+        for url in image_urls:
+            blocks.append({
+                "type": "image",
+                "image_url": url,
+                "alt_text": f"Image from {contact_name}"
+            })
+
         # Post to the case channel
         try:
             client.chat_postMessage(
                 channel=case_channel_id,
-                text=forwarded_message
+                text=forwarded_message,
+                blocks=blocks
             )
-            print(f"  ✅ Posted to #{case_channel_name}" + (f" — tagged {mentions}" if mentions else ""))
+            print(f"  ✅ Posted to #{case_channel_name}" + (f" — tagged {mentions}" if mentions else "") + (f" — {len(image_urls)} image(s)" if image_urls else ""))
         except SlackApiError as e:
             print(f"  ❌ Error posting to #{case_channel_name}: {e}")
 
