@@ -1,21 +1,23 @@
 import os
 import re
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+import time
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "xoxb-your-bot-token-here")
-SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN", "xapp-your-app-token-here")
 SOURCE_CHANNEL_NAME = "phone-checks"
+POLL_INTERVAL = 5  # seconds between checks
 
 # ============================================================
-# APP SETUP
+# SETUP
 # ============================================================
-app = App(token=SLACK_BOT_TOKEN)
+client = WebClient(token=SLACK_BOT_TOKEN)
 channel_cache = {}
 source_channel_id = None
+last_timestamp = None  # Track the last message we've seen
 
 
 # ============================================================
@@ -27,7 +29,7 @@ def refresh_channel_cache():
     channel_cache = {}
     cursor = None
     while True:
-        result = app.client.conversations_list(
+        result = client.conversations_list(
             types="public_channel,private_channel",
             limit=1000,
             cursor=cursor
@@ -51,18 +53,18 @@ def get_source_channel_id():
     print(f"WARNING: Could not find source channel #{SOURCE_CHANNEL_NAME}")
 
 
-def get_message_text(event):
+def get_message_text(message):
     """
-    Extract the text from a message event.
-    Handles regular messages, bot messages, and messages with attachments.
+    Extract the text from a message.
+    Handles regular text, attachments, and blocks.
     """
     # Try the normal text field first
-    text = event.get("text", "")
+    text = message.get("text", "")
     if text:
         return text
 
-    # Some bots put content in attachments instead of text
-    attachments = event.get("attachments", [])
+    # Some bots put content in attachments
+    attachments = message.get("attachments", [])
     for att in attachments:
         if att.get("text"):
             return att["text"]
@@ -72,7 +74,7 @@ def get_message_text(event):
             return att["pretext"]
 
     # Some bots use blocks
-    blocks = event.get("blocks", [])
+    blocks = message.get("blocks", [])
     for block in blocks:
         if block.get("type") == "rich_text":
             for element in block.get("elements", []):
@@ -146,8 +148,8 @@ def find_case_channel(case_number):
 def join_channel(channel_id):
     """Auto-join a channel so the bot can post in it."""
     try:
-        app.client.conversations_join(channel=channel_id)
-    except Exception as e:
+        client.conversations_join(channel=channel_id)
+    except SlackApiError as e:
         if "already_in_channel" not in str(e):
             print(f"  Warning joining channel {channel_id}: {e}")
 
@@ -155,53 +157,58 @@ def join_channel(channel_id):
 def get_tagged_users_from_topic(channel_id):
     """Read the channel topic and extract user mentions."""
     try:
-        result = app.client.conversations_info(channel=channel_id)
+        result = client.conversations_info(channel=channel_id)
         topic = result["channel"]["topic"]["value"]
         user_ids = re.findall(r"<@(U[A-Z0-9]+)>", topic)
         return user_ids
-    except Exception as e:
+    except SlackApiError as e:
         print(f"Error reading topic for {channel_id}: {e}")
         return []
 
 
-# ============================================================
-# MESSAGE HANDLER — catches ALL message events
-# ============================================================
-@app.event("message")
-def handle_message(event, say):
-    channel = event.get("channel")
-    subtype = event.get("subtype")
+def get_new_messages():
+    """Fetch new messages from the source channel since last check."""
+    global last_timestamp
+    try:
+        kwargs = {
+            "channel": source_channel_id,
+            "limit": 20,
+        }
+        if last_timestamp:
+            kwargs["oldest"] = last_timestamp
 
-    # DEBUG: Log every event from the source channel
-    if channel == source_channel_id:
-        print(f"\n{'='*60}")
-        print(f"DEBUG EVENT from #phone-checks:")
-        print(f"  subtype: {subtype}")
-        print(f"  bot_id: {event.get('bot_id', 'none')}")
-        print(f"  user: {event.get('user', 'none')}")
-        print(f"  text: {event.get('text', '')[:100]}")
-        print(f"  has attachments: {len(event.get('attachments', []))}")
-        print(f"  has blocks: {len(event.get('blocks', []))}")
-        print(f"  full event keys: {list(event.keys())}")
+        result = client.conversations_history(**kwargs)
+        messages = result.get("messages", [])
 
-    # Only process messages from the source channel
-    if channel != source_channel_id:
-        return
+        # Messages come newest-first, reverse to process oldest first
+        messages.reverse()
 
-    # Ignore message edits, deletions, joins, etc.
-    # But allow: normal messages (no subtype), bot_message, and file_share
-    allowed_subtypes = {None, "bot_message", "file_share"}
-    if subtype not in allowed_subtypes:
-        print(f"  Skipped — subtype '{subtype}' not in allowed list")
-        return
+        # Filter out messages we've already seen (oldest param is inclusive)
+        if last_timestamp:
+            messages = [m for m in messages if m["ts"] != last_timestamp]
 
-    # Extract text from the message (handles regular text, attachments, blocks)
-    text = get_message_text(event)
+        # Update the last timestamp
+        if messages:
+            last_timestamp = messages[-1]["ts"]
+
+        return messages
+
+    except SlackApiError as e:
+        print(f"Error fetching messages: {e}")
+        return []
+
+
+def process_message(message):
+    """Process a single message from the source channel."""
+    # Extract text from the message
+    text = get_message_text(message)
     if not text:
-        print(f"  Skipped — no text content found")
         return
 
-    print(f"  Extracted text: {text[:120]}")
+    print(f"\n{'='*60}")
+    print(f"New message:")
+    print(f"  From: {message.get('username', message.get('user', message.get('bot_id', 'unknown')))}")
+    print(f"  Text: {text[:120]}")
 
     # Parse the Quo message
     contact_name, case_numbers, message_body = parse_quo_message(text)
@@ -238,23 +245,40 @@ def handle_message(event, say):
 
         # Post to the case channel
         try:
-            app.client.chat_postMessage(
+            client.chat_postMessage(
                 channel=case_channel_id,
                 text=forwarded_message
             )
             print(f"  ✅ Posted to #{case_channel_name}" + (f" — tagged {mentions}" if mentions else ""))
-        except Exception as e:
+        except SlackApiError as e:
             print(f"  ❌ Error posting to #{case_channel_name}: {e}")
 
 
 # ============================================================
-# START THE BOT
+# MAIN LOOP
 # ============================================================
 if __name__ == "__main__":
-    print("Starting Case Router Bot...")
+    print("Starting Case Router Bot (polling mode)...")
     print("=" * 60)
     refresh_channel_cache()
     get_source_channel_id()
+
+    if not source_channel_id:
+        print("FATAL: Could not find source channel. Exiting.")
+        exit(1)
+
+    # Set the starting timestamp to now so we don't process old messages
+    last_timestamp = str(time.time())
+
     print("=" * 60)
-    print("Listening for messages...\n")
-    SocketModeHandler(app, SLACK_APP_TOKEN).start()
+    print(f"Polling #{SOURCE_CHANNEL_NAME} every {POLL_INTERVAL} seconds...\n")
+
+    while True:
+        try:
+            messages = get_new_messages()
+            for msg in messages:
+                process_message(msg)
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+
+        time.sleep(POLL_INTERVAL)
