@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import traceback
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
@@ -17,7 +18,7 @@ POLL_INTERVAL = 5  # seconds between checks
 client = WebClient(token=SLACK_BOT_TOKEN)
 channel_cache = {}
 source_channel_id = None
-last_timestamp = None  # Track the last message we've seen
+last_timestamp = None
 
 
 # ============================================================
@@ -51,6 +52,19 @@ def get_source_channel_id():
             print(f"Source channel: #{SOURCE_CHANNEL_NAME} ({ch_id})")
             return
     print(f"WARNING: Could not find source channel #{SOURCE_CHANNEL_NAME}")
+
+
+def clean_mrkdwn(text):
+    """
+    Clean Slack mrkdwn formatting to get plain text.
+    - Converts <url|label> links to just the label
+    - Converts <tel:number|label> to just the label
+    - Removes bold markers *text* → text
+    """
+    text = re.sub(r"<[^|>]+\|([^>]+)>", r"\1", text)
+    text = re.sub(r"<([^>]+)>", r"\1", text)
+    text = text.replace("*", "")
+    return text.strip()
 
 
 def get_message_text(message):
@@ -96,32 +110,11 @@ def get_message_text(message):
     return ""
 
 
-def clean_mrkdwn(text):
-    """
-    Clean Slack mrkdwn formatting to get plain text.
-    - Converts <url|label> links to just the label
-    - Converts <tel:number|label> to just the label
-    - Removes bold markers *text* → text
-    """
-    # Convert <url|label> and <tel:number|label> to just the label
-    text = re.sub(r"<[^|>]+\|([^>]+)>", r"\1", text)
-    # Remove any remaining <url> links without labels
-    text = re.sub(r"<([^>]+)>", r"\1", text)
-    # Remove bold markers
-    text = text.replace("*", "")
-    return text.strip()
-
-
 def parse_quo_message(text):
     """
     Parse a Quo message to extract contact name, case numbers, and message body.
 
     Format: "Name CaseNum(s) (phone) → RJL line (phone) MessageText"
-
-    Examples:
-        "Phil Garret 1425 (512) 694-5181 → RJL Outbound (512) 500-5266 Hi Laura..."
-        "Lourdes Galeas 940 & 1206 (504) 723-7482 → RJL Main Line (512) 537-3369 Esos me los dio..."
-        "(512) 964-4192 → RJL Main Line (512) 537-3369 Missed call"  <-- no contact, skip
 
     Returns: (contact_name, [case_numbers], message_body) or (None, [], None) if no contact
     """
@@ -147,7 +140,6 @@ def parse_quo_message(text):
 
     # Extract the message body
     # Quo uses \n to separate the header line from the message body
-    # Also handle the old format where it's all on one line after → RJL... (phone)
     body_match = re.search(r"→\s*RJL[^)]+\)\n\s*(.*)", text, re.DOTALL)
     if not body_match:
         body_match = re.search(r"→\s*RJL[^)]+\)\s*(.*)", text, re.DOTALL)
@@ -217,7 +209,6 @@ def get_new_messages():
         # Update the last timestamp
         if messages:
             last_timestamp = messages[-1]["ts"]
-            print(f"  Updated last_timestamp to {last_timestamp}")
 
         return messages
 
@@ -226,12 +217,12 @@ def get_new_messages():
         return []
     except Exception as e:
         print(f"Unexpected error fetching messages: {e}")
+        traceback.print_exc()
         return []
 
 
 def process_message(message):
     """Process a single message from the source channel."""
-    # DEBUG: Log the raw message so we can see exactly what Quo sends
     print(f"\n{'='*60}")
     print(f"RAW MESSAGE: {message}")
 
@@ -302,8 +293,19 @@ if __name__ == "__main__":
         print("FATAL: Could not find source channel. Exiting.")
         exit(1)
 
-    # Set the starting timestamp to now so we don't process old messages
-    last_timestamp = str(time.time())
+    # Get the latest message timestamp from the channel so we only process new ones
+    try:
+        result = client.conversations_history(channel=source_channel_id, limit=1)
+        messages = result.get("messages", [])
+        if messages:
+            last_timestamp = messages[0]["ts"]
+            print(f"Starting from timestamp: {last_timestamp}")
+        else:
+            last_timestamp = "0"
+            print("No messages in channel, starting from beginning")
+    except Exception as e:
+        print(f"Error getting initial timestamp: {e}")
+        last_timestamp = "0"
 
     print("=" * 60)
     print(f"Polling #{SOURCE_CHANNEL_NAME} every {POLL_INTERVAL} seconds...\n")
@@ -313,9 +315,10 @@ if __name__ == "__main__":
             messages = get_new_messages()
             if messages:
                 print(f"Found {len(messages)} new message(s)")
-            for msg in messages:
-                process_message(msg)
+                for msg in messages:
+                    process_message(msg)
         except Exception as e:
             print(f"Error in main loop: {e}")
+            traceback.print_exc()
 
         time.sleep(POLL_INTERVAL)
