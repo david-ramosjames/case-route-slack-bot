@@ -217,11 +217,15 @@ def get_new_messages():
         # Update the last timestamp
         if messages:
             last_timestamp = messages[-1]["ts"]
+            print(f"  Updated last_timestamp to {last_timestamp}")
 
         return messages
 
     except SlackApiError as e:
         print(f"Error fetching messages: {e}")
+        return []
+    except Exception as e:
+        print(f"Unexpected error fetching messages: {e}")
         return []
 
 
@@ -307,6 +311,8 @@ if __name__ == "__main__":
     while True:
         try:
             messages = get_new_messages()
+            if messages:
+                print(f"Found {len(messages)} new message(s)")
             for msg in messages:
                 process_message(msg)
         except Exception as e:
